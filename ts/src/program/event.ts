@@ -2,20 +2,32 @@ import { PublicKey } from "@solana/web3.js";
 import * as base64 from "base64-js";
 import * as assert from "assert";
 import Coder, { eventDiscriminator } from "../coder";
+import { Idl } from "../idl";
 
 const LOG_START_INDEX = "Program log: ".length;
 
-export class EventParser<T> {
+export type Event = {
+  name: string;
+  data: Object;
+};
+
+export class EventParser {
   private coder: Coder;
   private programId: PublicKey;
-  private eventName: string;
-  private discriminator: Buffer;
+  // Maps base64 encoded event discriminator to event name.
+  private discriminators: Map<string, string>;
 
-  constructor(coder: Coder, programId: PublicKey, eventName: string) {
+  constructor(coder: Coder, programId: PublicKey, idl: Idl) {
     this.coder = coder;
     this.programId = programId;
-    this.eventName = eventName;
-    this.discriminator = eventDiscriminator(eventName);
+    this.discriminators = new Map<string, string>(
+      idl.events === undefined
+        ? []
+        : idl.events.map((e) => [
+            base64.fromByteArray(eventDiscriminator(e.name)),
+            e.name,
+          ])
+    );
   }
 
   // Each log given, represents an array of messages emitted by
@@ -29,7 +41,7 @@ export class EventParser<T> {
   // its emission, thereby allowing us to know if a given log event was
   // emitted by *this* program. If it was, then we parse the raw string and
   // emit the event if the string matches the event being subscribed to.
-  public parseLogs(logs: string[], callback: (log: T) => void) {
+  public parseLogs(logs: string[], callback: (log: Event) => void) {
     const logScanner = new LogScanner(logs);
     const execution = new ExecutionContext(logScanner.next() as string);
 
@@ -70,16 +82,22 @@ export class EventParser<T> {
   }
 
   // Handles logs from *this* program.
-  private handleProgramLog(log: string): [T | null, string | null, boolean] {
+  private handleProgramLog(
+    log: string
+  ): [Event | null, string | null, boolean] {
     // This is a `msg!` log.
     if (log.startsWith("Program log:")) {
       const logStr = log.slice(LOG_START_INDEX);
       const logArr = Buffer.from(base64.toByteArray(logStr));
-      const disc = logArr.slice(0, 8);
+      const disc = base64.fromByteArray(logArr.slice(0, 8));
       // Only deserialize if the discriminator implies a proper event.
       let event = null;
-      if (disc.equals(this.discriminator)) {
-        event = this.coder.events.decode(this.eventName, logArr.slice(8));
+      let eventName = this.discriminators.get(disc);
+      if (eventName !== undefined) {
+        event = {
+          name: eventName,
+          data: this.coder.events.decode(eventName, logArr.slice(8)),
+        };
       }
       return [event, null, false];
     }
@@ -96,7 +114,7 @@ export class EventParser<T> {
   private handleLog(
     execution: ExecutionContext,
     log: string
-  ): [T | null, string | null, boolean] {
+  ): [Event | null, string | null, boolean] {
     // Executing program is this program.
     if (execution.program() === this.programId.toString()) {
       return this.handleProgramLog(log);
